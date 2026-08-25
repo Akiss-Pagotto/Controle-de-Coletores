@@ -76,10 +76,11 @@ async function insertRecord(record){
 async function syncRecords(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('lancamentos').delete().gte('id',0);if(error)throw error;if(db.records.length){let rows=db.records.filter(hasRecordInfo).map(r=>({matricula:r.matricula,usuario:r.usuario,coletor:r.coletor,status:r.status,tipo:r.tipo,data:r.data,hora:r.hora,identificacao:r.identificacao||''}));for(let i=0;i<rows.length;i+=500){let {error:e}=await sb.from('lancamentos').insert(rows.slice(i,i+500));if(e)throw e}}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível sincronizar o histórico com o banco.')}finally{setCloudBusy(false)}}
 async function syncAll(){await syncUsers();await syncBase();await syncRecords()}
 
-function latestForCollector(c){return db.records.find(r=>String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase())}
+function latestForCollector(c){return db.records.filter(r=>String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase()).sort((a,b)=>Number(b.id||0)-Number(a.id||0))[0]||null}
+function latestForPersonCollector(m,c){return db.records.filter(r=>String(r.matricula||'').trim()===String(m||'').trim()&&String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase()).sort((a,b)=>Number(b.id||0)-Number(a.id||0))[0]||null}
 function baseForCode(c){let q=String(c||'').trim().toLowerCase();return db.base.find(x=>String(x.numeroSerie||'').trim().toLowerCase()===q||String(x.identificacao||'').trim().toLowerCase()===q)}
-function pairState(r){let pair=db.records.filter(x=>String(x.matricula).trim()===String(r.matricula).trim()&&String(x.coletor).trim().toLowerCase()===String(r.coletor).trim().toLowerCase());return pair.length&&pair[0].tipo==='Devolução'?'returned':'open'}
-function updateStatusFromCollector(){let last=latestForCollector(form.coletor);if(form.tipo==='Devolução'){form.status=last&&last.tipo==='Retirada'?last.status:'BOM'}else if(!last||last.tipo==='Devolução'){form.status='BOM'}else{form.status=last.status||'BOM'}}
+function pairState(r){let last=latestForPersonCollector(r.matricula,r.coletor);return last&&last.tipo==='Devolução'?'returned':'open'}
+function updateStatusFromCollector(){let last=latestForPersonCollector(form.matricula,form.coletor);if(form.tipo==='Devolução'){form.status=last&&last.tipo==='Retirada'?last.status:'BOM'}else{form.status='BOM'}}
 function identifyCollector(){let b=baseForCode(form.coletor);if(b){form.coletor=String(b.numeroSerie||form.coletor).trim();form.identificacao=b.identificacao||''}else{form.identificacao=''}return b}
 function resetForm(){form={matricula:'',usuario:'',coletor:'',identificacao:'',status:'BOM',tipo:'',data:today(),hora:now()}}
 function setNotice(type,text){notice={type,text};render()}
@@ -128,13 +129,11 @@ async function register(){
   if(!form.coletor)return setNotice('error','Preencha o código/número do coletor.');
   let b=identifyCollector();
   if(!b)return setNotice('error','Coletor não encontrado na base. Vá em “Atualizar base” e confira o número de série/código.');
-  let last=latestForCollector(form.coletor);
-  if(form.tipo==='Retirada'&&last&&last.tipo==='Retirada')return setNotice('error','Este coletor já está retirado e aguarda devolução.');
   if(!form.tipo)return setNotice('error','Selecione Retirada ou Devolução.');
   if(form.tipo==='Devolução'){
-    last=latestForCollector(form.coletor);
-    if(!last||last.tipo!=='Retirada')return setNotice('error','Não há uma retirada pendente para este coletor.');
-    form.status=last.status||'BOM';
+    const lastPerson=latestForPersonCollector(form.matricula,form.coletor);
+    if(!lastPerson||lastPerson.tipo!=='Retirada')return setNotice('error','Esta pessoa não possui uma retirada pendente deste coletor.');
+    form.status=lastPerson.status||'BOM';
   }else if(!['BOM','AVARIADO'].includes(form.status))return setNotice('error','Selecione o status da retirada.');
 
   const stamp=new Date();
@@ -152,8 +151,8 @@ async function register(){
     query='';
     filters={tipo:'',status:'',situacao:'',de:'',ate:'',identificacao:''};
     resetForm();
-    tab='historico';
-    notice={type:'ok',text:'Lançamento salvo com sucesso e exibido no histórico.'};
+    tab='lancamento';
+    notice={type:'ok',text:'Lançamento salvo com sucesso. Pronto para o próximo lançamento.'};
     render();
   }catch(e){
     console.error('Erro ao registrar lançamento:',e);
