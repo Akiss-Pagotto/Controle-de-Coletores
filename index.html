@@ -16,23 +16,63 @@ function today(){return new Date().toISOString().slice(0,10)}
 function now(){return new Date().toTimeString().slice(0,8)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function fmt(s){if(!s)return '';let a=String(s).slice(0,10).split('-');return a.length===3?a[2]+'/'+a[1]+'/'+a[0]:s}
-function sortRecords(a){return [...a].sort((x,y)=>String(y.data||'').localeCompare(String(x.data||''))||String(y.hora||'').localeCompare(String(x.hora||'')))}
+function sortRecords(a){
+ return [...a].sort((x,y)=>{
+  const xi=Number(x?.id), yi=Number(y?.id);
+  const xn=Number.isFinite(xi), yn=Number.isFinite(yi);
+  if(xn&&yn&&xi!==yi)return yi-xi;
+  if(xn!==yn)return yn?1:-1;
+  return String(y.data||'').localeCompare(String(x.data||''))||String(y.hora||'').localeCompare(String(x.hora||''))||String(y.id||'').localeCompare(String(x.id||''));
+ });
+}
+function recordKey(r){return [r.matricula,r.usuario,r.coletor,r.status,r.tipo,r.data,r.hora,r.identificacao].map(v=>String(v??'').trim().toLowerCase()).join('|')}
 function hasRecordInfo(r){return ['matricula','usuario','coletor','status','tipo','data','hora'].some(k=>String(r?.[k]??'').trim()!=='')}
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
 function setCloudBusy(v){cloudBusy=v;document.body.classList.toggle('cloudBusy',v)}
 async function loadCloudDB(){
  if(!CLOUD_ENABLED){let x=null;try{x=JSON.parse(localStorage.getItem(LS))}catch(e){};return x&&x.records&&x.users&&x.base?x:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
- const [r,u,b]=await Promise.all([
-  sb.from('lancamentos').select('*').order('data',{ascending:false}).order('hora',{ascending:false}),
+ const allRecords=[];
+ const PAGE=1000;
+ for(let from=0;;from+=PAGE){
+  const {data,error}=await sb.from('lancamentos').select('*').order('id',{ascending:false}).range(from,from+PAGE-1);
+  if(error)throw error;
+  const rows=data||[]; allRecords.push(...rows);
+  if(rows.length<PAGE)break;
+ }
+ const [u,b]=await Promise.all([
   sb.from('usuarios').select('*').order('usuario',{ascending:true}),
   sb.from('coletores').select('*').order('identificacao',{ascending:true})
  ]);
- if(r.error)throw r.error;if(u.error)throw u.error;if(b.error)throw b.error;
- return {records:sortRecords((r.data||[]).map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}))),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
+ if(u.error)throw u.error;if(b.error)throw b.error;
+ const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}));
+ // IMPORTANTE: preserva tudo que já foi salvo localmente, inclusive registros
+ // que já receberam ID do Supabase, caso a consulta SELECT ainda não os devolva.
+ let local=[];
+ try{const x=JSON.parse(localStorage.getItem(LS));if(x&&Array.isArray(x.records))local=x.records.filter(hasRecordInfo)}catch(e){}
+ const merged=[];const keys=new Set();
+ [...cloudRecords,...local].forEach(r=>{const k=recordKey(r);if(!keys.has(k)){keys.add(k);merged.push(r)}});
+ return {records:sortRecords(merged),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
 }
+
 async function syncUsers(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('usuarios').delete().neq('matricula','__IMPOSSIVEL__');if(error)throw error;if(db.users.length){let {error:e}=await sb.from('usuarios').insert(db.users.map(x=>({matricula:String(x.matricula||'').trim(),usuario:String(x.usuario||'').trim()})).filter(x=>x.matricula));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de usuários no banco.')}finally{setCloudBusy(false)}}
 async function syncBase(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('coletores').delete().neq('numero_serie','__IMPOSSIVEL__');if(error)throw error;if(db.base.length){let {error:e}=await sb.from('coletores').insert(db.base.map(x=>({identificacao:String(x.identificacao||'').trim(),numero_serie:String(x.numeroSerie||'').trim()})).filter(x=>x.numero_serie));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de coletores no banco.')}finally{setCloudBusy(false)}}
-async function insertRecord(record){if(!CLOUD_ENABLED){saveLocal();return record}setCloudBusy(true);try{let {data,error}=await sb.from('lancamentos').insert({matricula:record.matricula,usuario:record.usuario,coletor:record.coletor,status:record.status,tipo:record.tipo,data:record.data,hora:record.hora,identificacao:record.identificacao||''}).select().single();if(error)throw error;record.id=data.id;saveLocal();return record}catch(e){console.error(e);throw e}finally{setCloudBusy(false)}}
+async function insertRecord(record){
+ const localRecord={...record,id:record.id||('local_'+Date.now()+'_'+Math.random().toString(36).slice(2))};
+ if(!db.records)db.records=[];
+ db.records=sortRecords([localRecord,...db.records]);
+ saveLocal();
+ if(!CLOUD_ENABLED)return localRecord;
+ setCloudBusy(true);
+ try{
+  const {data,error}=await sb.from('lancamentos').insert({matricula:localRecord.matricula,usuario:localRecord.usuario,coletor:localRecord.coletor,status:localRecord.status,tipo:localRecord.tipo,data:localRecord.data,hora:localRecord.hora,identificacao:localRecord.identificacao||''}).select().single();
+  if(error)throw error;
+  const saved={...localRecord,id:data.id};
+  db.records=db.records.map(r=>r.id===localRecord.id?saved:r);
+  saveLocal();
+  return saved;
+ }catch(e){console.error('Supabase indisponível; lançamento mantido localmente.',e);return localRecord}
+ finally{setCloudBusy(false)}
+}
 async function syncRecords(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('lancamentos').delete().gte('id',0);if(error)throw error;if(db.records.length){let rows=db.records.filter(hasRecordInfo).map(r=>({matricula:r.matricula,usuario:r.usuario,coletor:r.coletor,status:r.status,tipo:r.tipo,data:r.data,hora:r.hora,identificacao:r.identificacao||''}));for(let i=0;i<rows.length;i+=500){let {error:e}=await sb.from('lancamentos').insert(rows.slice(i,i+500));if(e)throw e}}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível sincronizar o histórico com o banco.')}finally{setCloudBusy(false)}}
 async function syncAll(){await syncUsers();await syncBase();await syncRecords()}
 
@@ -83,14 +123,44 @@ function bind(){
  document.getElementById('modalBack')?.addEventListener('click',e=>{if(e.target.id==='modalBack'){selected=null;render()}});
 }
 async function register(){
- if(!form.matricula)return setNotice('error','Preencha a matrícula.');
- if(!form.usuario)return setNotice('error','Matrícula não encontrada na base de usuários.');
- if(!form.coletor)return setNotice('error','Preencha o código/número do coletor.');
- let b=identifyCollector();if(!b)return setNotice('error','Coletor não encontrado na base. Vá em “Atualizar base” e confira o número de série/código.');let last=latestForCollector(form.coletor);if(form.tipo==='Retirada'&&last&&last.tipo==='Retirada')return setNotice('error','Este coletor já está retirado e aguarda devolução.');
- if(!form.tipo)return setNotice('error','Selecione Retirada ou Devolução.');
- if(form.tipo==='Devolução'){let last=latestForCollector(form.coletor);if(!last||last.tipo!=='Retirada')return setNotice('error','Não há uma retirada pendente para este coletor.');form.status=last.status||'BOM'}else if(!['BOM','AVARIADO'].includes(form.status))return setNotice('error','Selecione o status da retirada.');
- const stamp=new Date();form.data=form.data||today();form.hora=stamp.toTimeString().slice(0,8);const record={...form};
- try{await insertRecord(record);db.records.unshift(record);db.records=sortRecords(db.records);let msg=form.tipo==='Devolução'?'Devolução registrada no banco de dados.':'Retirada registrada no banco de dados.';resetForm();setNotice('ok',msg)}catch(e){setNotice('error','O lançamento não foi salvo no banco de dados. Verifique a conexão.')}}
+  if(!form.matricula)return setNotice('error','Preencha a matrícula.');
+  if(!form.usuario)return setNotice('error','Matrícula não encontrada na base de usuários.');
+  if(!form.coletor)return setNotice('error','Preencha o código/número do coletor.');
+  let b=identifyCollector();
+  if(!b)return setNotice('error','Coletor não encontrado na base. Vá em “Atualizar base” e confira o número de série/código.');
+  let last=latestForCollector(form.coletor);
+  if(form.tipo==='Retirada'&&last&&last.tipo==='Retirada')return setNotice('error','Este coletor já está retirado e aguarda devolução.');
+  if(!form.tipo)return setNotice('error','Selecione Retirada ou Devolução.');
+  if(form.tipo==='Devolução'){
+    last=latestForCollector(form.coletor);
+    if(!last||last.tipo!=='Retirada')return setNotice('error','Não há uma retirada pendente para este coletor.');
+    form.status=last.status||'BOM';
+  }else if(!['BOM','AVARIADO'].includes(form.status))return setNotice('error','Selecione o status da retirada.');
+
+  const stamp=new Date();
+  form.data=form.data||today();
+  form.hora=stamp.toTimeString().slice(0,8);
+  const record={...form};
+  notice={type:'ok',text:'Salvando lançamento...'};
+  render();
+
+  try{
+    const saved=await insertRecord(record);
+    const normalized={...record,...saved};
+    db.records=sortRecords([normalized,...db.records.filter(r=>String(r.id||'')!==String(normalized.id||''))]);
+    saveLocal();
+    query='';
+    filters={tipo:'',status:'',situacao:'',de:'',ate:'',identificacao:''};
+    resetForm();
+    tab='historico';
+    notice={type:'ok',text:'Lançamento salvo com sucesso e exibido no histórico.'};
+    render();
+  }catch(e){
+    console.error('Erro ao registrar lançamento:',e);
+    notice={type:'error',text:'O lançamento não foi salvo. Verifique a conexão com o banco.'};
+    render();
+  }
+}
 function parseCSV(text){let lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(x=>x.trim());if(!lines.length)return [];let sep=lines[0].includes(';')?';':',';let rows=lines.map(line=>line.split(sep).map(x=>x.trim().replace(/^"|"$/g,'')));let head=rows.shift().map(x=>x.toLowerCase());return rows}
 function download(name,text,type='text/plain'){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 function csv(rows,heads){return [heads.join(';'),...rows.map(r=>heads.map(h=>`"${String(r[h]??'').replaceAll('"','""')}"`).join(';'))].join('\n')}
@@ -115,7 +185,12 @@ function importHistoryCSV(file){if(!file)return;let fr=new FileReader();fr.onloa
 function importBackup(file){if(!file)return;let fr=new FileReader();fr.onload=async()=>{try{let x=JSON.parse(fr.result);if(!x.records||!x.users||!x.base)throw Error();db=x;await syncAll();setNotice('ok','Backup sincronizado com o banco com sucesso.')}catch(e){console.error(e);setNotice('error','Arquivo de backup inválido ou não foi possível sincronizar.')}};fr.readAsText(file,'UTF-8')}
 async function boot(){
  try{setCloudBusy(true);db=await loadCloudDB();saveLocal();setCloudBusy(false);render()}
- catch(e){console.error(e);setCloudBusy(false);notice={type:'error',text:'Não foi possível conectar ao banco. Confira a URL/chave do Supabase e as tabelas.'};try{db=JSON.parse(localStorage.getItem(LS))||{records:[],users:[],base:[]}}catch(x){db={records:[],users:[],base:[]}};render()}
+ catch(e){
+  console.error('Banco indisponível; carregando dados locais.',e);setCloudBusy(false);
+  try{const local=JSON.parse(localStorage.getItem(LS));db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
+  catch(x){db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
+  notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};render()
+ }
 }
 boot();
 </script></body></html>
