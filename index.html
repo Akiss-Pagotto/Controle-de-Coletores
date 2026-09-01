@@ -44,7 +44,7 @@ async function loadCloudDB(){
   sb.from('coletores').select('*').order('identificacao',{ascending:true})
  ]);
  if(u.error)throw u.error;if(b.error)throw b.error;
- const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}));
+ const seen=new Set(); const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''})).filter(x=>{const k=String(x.id??'');if(!k||seen.has(k))return false;seen.add(k);return true});
  // SUPABASE e a fonte oficial dos lancamentos.
  return {records:sortRecords(cloudRecords),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
 }
@@ -180,10 +180,9 @@ function importBackup(file){if(!file)return;let fr=new FileReader();fr.onload=as
 async function boot(){
  try{setCloudBusy(true);db=await loadCloudDB();saveLocal();setCloudBusy(false);render()}
  catch(e){
-  console.error('Banco indisponível; carregando dados locais.',e);setCloudBusy(false);
-  try{const local=JSON.parse(localStorage.getItem(LS));db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
-  catch(x){db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
-  notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};render()
+  console.error('Falha ao carregar o Supabase.',e);setCloudBusy(false);
+  db={records:[],users:[],base:[]};
+  notice={type:'error',text:'Não foi possível carregar os dados do Supabase. Nenhum histórico local antigo será exibido.'};render()
  }
 }
 boot();
