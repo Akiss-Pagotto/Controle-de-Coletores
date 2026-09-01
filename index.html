@@ -25,15 +25,14 @@ function sortRecords(a){
   return String(y.data||'').localeCompare(String(x.data||''))||String(y.hora||'').localeCompare(String(x.hora||''))||String(y.id||'').localeCompare(String(x.id||''));
  });
 }
+function normalizeMatricula(v){const d=String(v??'').replace(/\D/g,'');if(!d)return '';return d.replace(/^0+(?=\d)/,'')}
+function findUserByMatricula(v){const key=normalizeMatricula(v);if(!key)return null;return db.users.find(x=>normalizeMatricula(x.matricula)===key)||null}
 function recordKey(r){return [r.matricula,r.usuario,r.coletor,r.status,r.tipo,r.data,r.hora,r.identificacao].map(v=>String(v??'').trim().toLowerCase()).join('|')}
 function hasRecordInfo(r){return ['matricula','usuario','coletor','status','tipo','data','hora'].some(k=>String(r?.[k]??'').trim()!=='')}
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
 function setCloudBusy(v){cloudBusy=v;document.body.classList.toggle('cloudBusy',v)}
 async function loadCloudDB(){
- if(!CLOUD_ENABLED){
-  let x=null;try{x=JSON.parse(localStorage.getItem(LS))}catch(e){}
-  return x&&x.records&&x.users&&x.base?x:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
- }
+ if(!CLOUD_ENABLED){let x=null;try{x=JSON.parse(localStorage.getItem(LS))}catch(e){};return x&&x.records&&x.users&&x.base?x:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
  const allRecords=[];
  const PAGE=1000;
  for(let from=0;;from+=PAGE){
@@ -46,17 +45,13 @@ async function loadCloudDB(){
   sb.from('usuarios').select('*').order('usuario',{ascending:true}),
   sb.from('coletores').select('*').order('identificacao',{ascending:true})
  ]);
- if(u.error)throw u.error;
- if(b.error)throw b.error;
- return {
-  records:sortRecords(allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}))),
-  users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),
-  base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))
- };
+ if(u.error)throw u.error;if(b.error)throw b.error;
+ const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}));
+ // Supabase é a fonte de verdade quando a nuvem está configurada.
+ // NÃO mesclar localStorage aqui, para registros apagados do banco não voltarem.
+ return {records:sortRecords(cloudRecords),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
 }
 
-async function syncUsers(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('usuarios').delete().neq('matricula','__IMPOSSIVEL__');if(error)throw error;if(db.users.length){let {error:e}=await sb.from('usuarios').insert(db.users.map(x=>({matricula:String(x.matricula||'').trim(),usuario:String(x.usuario||'').trim()})).filter(x=>x.matricula));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de usuários no banco.')}finally{setCloudBusy(false)}}
-async function syncBase(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('coletores').delete().neq('numero_serie','__IMPOSSIVEL__');if(error)throw error;if(db.base.length){let {error:e}=await sb.from('coletores').insert(db.base.map(x=>({identificacao:String(x.identificacao||'').trim(),numero_serie:String(x.numeroSerie||'').trim()})).filter(x=>x.numero_serie));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de coletores no banco.')}finally{setCloudBusy(false)}}
 async function insertRecord(record){
  const localRecord={...record,id:record.id||('local_'+Date.now()+'_'+Math.random().toString(36).slice(2))};
  if(!db.records)db.records=[];
@@ -78,7 +73,7 @@ async function syncRecords(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(
 async function syncAll(){await syncUsers();await syncBase();await syncRecords()}
 
 function latestForCollector(c){return db.records.filter(r=>String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase()).sort((a,b)=>Number(b.id||0)-Number(a.id||0))[0]||null}
-function latestForPersonCollector(m,c){return db.records.filter(r=>String(r.matricula||'').trim()===String(m||'').trim()&&String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase()).sort((a,b)=>Number(b.id||0)-Number(a.id||0))[0]||null}
+function latestForPersonCollector(m,c){const mk=normalizeMatricula(m);return db.records.filter(r=>normalizeMatricula(r.matricula)===mk&&String(r.coletor||'').trim().toLowerCase()===String(c||'').trim().toLowerCase()).sort((a,b)=>Number(b.id||0)-Number(a.id||0))[0]||null}
 function baseForCode(c){let q=String(c||'').trim().toLowerCase();return db.base.find(x=>String(x.numeroSerie||'').trim().toLowerCase()===q||String(x.identificacao||'').trim().toLowerCase()===q)}
 function pairState(r){let last=latestForPersonCollector(r.matricula,r.coletor);return last&&last.tipo==='Devolução'?'returned':'open'}
 function updateStatusFromCollector(){let last=latestForPersonCollector(form.matricula,form.coletor);if(form.tipo==='Devolução'){form.status=last&&last.tipo==='Retirada'?last.status:'BOM'}else{form.status='BOM'}}
@@ -102,10 +97,33 @@ function bind(){
  document.querySelector('.closeNotice')?.addEventListener('click',()=>{notice=null;render()});
  if(tab==='lancamento'){
   const mat=document.getElementById('mat'),col=document.getElementById('col'),type=document.getElementById('tipo'),status=document.getElementById('status');
-  mat.oninput=()=>{form.matricula=mat.value.replace(/\D/g,'');let u=db.users.find(x=>String(x.matricula).trim()===form.matricula.trim());form.usuario=u?u.usuario:'';mat.value=form.matricula;document.getElementById('user').value=form.usuario};
-  mat.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();col.focus()}};
-  col.oninput=()=>{form.coletor=col.value.trim();let b=identifyCollector();updateStatusFromCollector();document.querySelector('.grid label:nth-child(4) input').value=form.identificacao;let st=document.getElementById('status');if(st)st.value=form.status};
-  col.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();type.focus()}};
+   const userInput=document.getElementById('user');
+   const identInput=document.querySelector('.grid label:nth-child(4) input');
+   let matFocusTimer=null,colFocusTimer=null;
+   const focusCollector=()=>{clearTimeout(matFocusTimer);col.focus();col.select?.()};
+   const focusType=()=>{clearTimeout(colFocusTimer);type.focus()};
+   const updateUser=()=>{
+     form.matricula=mat.value.replace(/\D/g,'');
+     const u=findUserByMatricula(form.matricula);
+     form.usuario=u?String(u.usuario||'').trim():'';
+     mat.value=form.matricula;
+     userInput.value=form.usuario;
+     if(u&&form.matricula){matFocusTimer=setTimeout(focusCollector,60)}
+   };
+   mat.oninput=updateUser;
+   mat.onblur=updateUser;
+   mat.onkeydown=e=>{if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();updateUser();focusCollector()}};
+   const updateCollector=()=>{
+     form.coletor=col.value.trim();
+     const b=identifyCollector();
+     updateStatusFromCollector();
+     identInput.value=form.identificacao;
+     let st=document.getElementById('status');if(st)st.value=form.status;
+     if(b&&form.coletor){colFocusTimer=setTimeout(focusType,60)}
+   };
+   col.oninput=updateCollector;
+   col.onblur=updateCollector;
+   col.onkeydown=e=>{if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();updateCollector();focusType()}};
   type.onchange=()=>{form.tipo=type.value;updateStatusFromCollector();let st=document.getElementById('status');if(st)st.value=form.status;st?.toggleAttribute('disabled',form.tipo==='Devolução');st?.classList.toggle('disabled',form.tipo==='Devolução')};
   status?.addEventListener('change',()=>{if(form.tipo!=='Devolução'){form.status=status.value}});
   document.getElementById('date').onchange=e=>form.data=e.target.value;
@@ -183,79 +201,13 @@ function bindBase(){
 function importCSV(file,kind){if(!file)return;let fr=new FileReader();fr.onload=async()=>{let rows=parseCSV(fr.result);if(kind==='users'){db.users=rows.map(r=>({matricula:r[0]||'',usuario:r[1]||''})).filter(x=>x.matricula||x.usuario);await syncUsers();setNotice('ok','Base de usuários atualizada no banco.')}else{db.base=rows.map(r=>({identificacao:r[0]||'',numeroSerie:r[1]||''})).filter(x=>x.identificacao||x.numeroSerie);await syncBase();setNotice('ok','Base de coletores atualizada no banco.')}};fr.readAsText(file,'UTF-8')}
 function importHistoryCSV(file){if(!file)return;let fr=new FileReader();fr.onload=async()=>{let rows=parseCSV(fr.result);let imported=rows.map(r=>({matricula:r[0]||'',usuario:r[1]||'',coletor:r[2]||'',status:r[3]||'BOM',tipo:r[4]||'',data:r[5]||'',hora:r[6]||'',identificacao:r[7]||''})).filter(x=>x.matricula||x.usuario||x.coletor||x.data||x.hora);if(!imported.length)return setNotice('error','Nenhum lançamento válido encontrado no CSV.');db.records=sortRecords(db.records.concat(imported));await syncRecords();setNotice('ok',`${imported.length.toLocaleString('pt-BR')} lançamento(s) sincronizado(s) com o banco.`)};fr.readAsText(file,'UTF-8')}
 function importBackup(file){if(!file)return;let fr=new FileReader();fr.onload=async()=>{try{let x=JSON.parse(fr.result);if(!x.records||!x.users||!x.base)throw Error();db=x;await syncAll();setNotice('ok','Backup sincronizado com o banco com sucesso.')}catch(e){console.error(e);setNotice('error','Arquivo de backup inválido ou não foi possível sincronizar.')}};fr.readAsText(file,'UTF-8')}
-let refreshTimer=null;
-let refreshInProgress=false;
-
-async function refreshFromCloud(showNotice=false){
- if(!CLOUD_ENABLED || refreshInProgress)return;
- refreshInProgress=true;
- try{
-  const fresh=await loadCloudDB();
-  db=fresh;
-  saveLocal();
-  if(showNotice)notice={type:'ok',text:'Dados atualizados do banco.'};
-  render();
- }catch(e){
-  console.error('Falha ao atualizar do Supabase:',e);
-  if(showNotice){
-   notice={type:'error',text:'Não foi possível atualizar os dados do banco.'};
-   render();
-  }
- }finally{
-  refreshInProgress=false;
- }
-}
-
-function startCloudSync(){
- if(!CLOUD_ENABLED)return;
- // Atualiza periodicamente para refletir alterações feitas em outro navegador
- // ou diretamente no painel do Supabase, mesmo sem cache/realtime.
- if(refreshTimer)clearInterval(refreshTimer);
- refreshTimer=setInterval(()=>refreshFromCloud(false),5000);
-
- // Atualiza imediatamente quando esta aba volta a ficar visível/ativa.
- document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshFromCloud(false)});
- window.addEventListener('focus',()=>refreshFromCloud(false));
- window.addEventListener('pageshow',()=>refreshFromCloud(false));
-
- // Realtime: quando a publicação do Supabase estiver habilitada, a mudança
- // chega praticamente em tempo real. O polling acima continua como garantia.
- try{
-  sb.channel('controle-coletores-sync')
-   .on('postgres_changes',{event:'*',schema:'public',table:'lancamentos'},()=>refreshFromCloud(false))
-   .on('postgres_changes',{event:'*',schema:'public',table:'usuarios'},()=>refreshFromCloud(false))
-   .on('postgres_changes',{event:'*',schema:'public',table:'coletores'},()=>refreshFromCloud(false))
-   .subscribe();
- }catch(e){console.warn('Realtime indisponível; polling continua ativo.',e)}
-}
-
 async function boot(){
- try{
-  setCloudBusy(true);
-  db=await loadCloudDB();
-  saveLocal();
-  setCloudBusy(false);
-  render();
-  startCloudSync();
- }catch(e){
-  console.error('Banco indisponível.',e);
-  setCloudBusy(false);
-  if(CLOUD_ENABLED){
-   // Não usar localStorage como fallback quando há Supabase configurado,
-   // pois isso pode mostrar dados apagados do banco.
-   db={records:[],users:[],base:[]};
-   notice={type:'error',text:'Sem conexão com o banco. Aguardando reconexão...'};
-  }else{
-   try{
-    const local=JSON.parse(localStorage.getItem(LS));
-    db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
-   }catch(x){
-    db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
-   }
-   notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};
-  }
-  render();
-  startCloudSync();
+ try{setCloudBusy(true);db=await loadCloudDB();saveLocal();setCloudBusy(false);render()}
+ catch(e){
+  console.error('Banco indisponível; carregando dados locais.',e);setCloudBusy(false);
+  try{const local=JSON.parse(localStorage.getItem(LS));db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
+  catch(x){db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
+  notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};render()
  }
 }
 boot();
