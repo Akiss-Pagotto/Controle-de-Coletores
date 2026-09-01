@@ -45,13 +45,11 @@ async function loadCloudDB(){
  ]);
  if(u.error)throw u.error;if(b.error)throw b.error;
  const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}));
- // IMPORTANTE: preserva tudo que já foi salvo localmente, inclusive registros
- // que já receberam ID do Supabase, caso a consulta SELECT ainda não os devolva.
- let local=[];
- try{const x=JSON.parse(localStorage.getItem(LS));if(x&&Array.isArray(x.records))local=x.records.filter(hasRecordInfo)}catch(e){}
- const merged=[];const keys=new Set();
- [...cloudRecords,...local].forEach(r=>{const k=recordKey(r);if(!keys.has(k)){keys.add(k);merged.push(r)}});
- return {records:sortRecords(merged),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
+  // O Supabase é a fonte de verdade. Não mesclar dados antigos do localStorage.
+  // Isso garante que exclusões feitas no Supabase também removam os dados deste navegador.
+  const cloudUsers=(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario}));
+  const cloudBase=(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}));
+  return {records:sortRecords(cloudRecords),users:cloudUsers,base:cloudBase};
 }
 
 async function syncUsers(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('usuarios').delete().neq('matricula','__IMPOSSIVEL__');if(error)throw error;if(db.users.length){let {error:e}=await sb.from('usuarios').insert(db.users.map(x=>({matricula:String(x.matricula||'').trim(),usuario:String(x.usuario||'').trim()})).filter(x=>x.matricula));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de usuários no banco.')}finally{setCloudBusy(false)}}
@@ -191,5 +189,11 @@ async function boot(){
   notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};render()
  }
 }
+// Sincroniza outras abas/janelas deste mesmo navegador.
+window.addEventListener('storage',e=>{if(e.key===LS){try{const x=JSON.parse(e.newValue||'null');if(x&&x.records&&x.users&&x.base){db=x;render()}}catch(err){}}});
+// Reconsulta o Supabase a cada 15 segundos para refletir alterações feitas em outro navegador, computador ou diretamente no Supabase.
+let refreshInProgress=false;
+async function refreshFromCloud(){if(!CLOUD_ENABLED||refreshInProgress)return;refreshInProgress=true;try{db=await loadCloudDB();saveLocal();render()}catch(e){console.error('Falha ao atualizar dados do Supabase:',e)}finally{refreshInProgress=false}}
 boot();
+setInterval(refreshFromCloud,15000);
 </script></body></html>
