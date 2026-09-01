@@ -30,7 +30,10 @@ function hasRecordInfo(r){return ['matricula','usuario','coletor','status','tipo
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
 function setCloudBusy(v){cloudBusy=v;document.body.classList.toggle('cloudBusy',v)}
 async function loadCloudDB(){
- if(!CLOUD_ENABLED){let x=null;try{x=JSON.parse(localStorage.getItem(LS))}catch(e){};return x&&x.records&&x.users&&x.base?x:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
+ if(!CLOUD_ENABLED){
+  let x=null;try{x=JSON.parse(localStorage.getItem(LS))}catch(e){}
+  return x&&x.records&&x.users&&x.base?x:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
+ }
  const allRecords=[];
  const PAGE=1000;
  for(let from=0;;from+=PAGE){
@@ -43,15 +46,13 @@ async function loadCloudDB(){
   sb.from('usuarios').select('*').order('usuario',{ascending:true}),
   sb.from('coletores').select('*').order('identificacao',{ascending:true})
  ]);
- if(u.error)throw u.error;if(b.error)throw b.error;
- const cloudRecords=allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}));
- // IMPORTANTE: preserva tudo que já foi salvo localmente, inclusive registros
- // que já receberam ID do Supabase, caso a consulta SELECT ainda não os devolva.
- let local=[];
- try{const x=JSON.parse(localStorage.getItem(LS));if(x&&Array.isArray(x.records))local=x.records.filter(hasRecordInfo)}catch(e){}
- const merged=[];const keys=new Set();
- [...cloudRecords,...local].forEach(r=>{const k=recordKey(r);if(!keys.has(k)){keys.add(k);merged.push(r)}});
- return {records:sortRecords(merged),users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))};
+ if(u.error)throw u.error;
+ if(b.error)throw b.error;
+ return {
+  records:sortRecords(allRecords.map(x=>({id:x.id,matricula:x.matricula,usuario:x.usuario,coletor:x.coletor,status:x.status,tipo:x.tipo,data:x.data,hora:x.hora,identificacao:x.identificacao||''}))),
+  users:(u.data||[]).map(x=>({matricula:x.matricula,usuario:x.usuario})),
+  base:(b.data||[]).map(x=>({identificacao:x.identificacao,numeroSerie:x.numero_serie}))
+ };
 }
 
 async function syncUsers(){if(!CLOUD_ENABLED){saveLocal();return}setCloudBusy(true);try{let {error}=await sb.from('usuarios').delete().neq('matricula','__IMPOSSIVEL__');if(error)throw error;if(db.users.length){let {error:e}=await sb.from('usuarios').insert(db.users.map(x=>({matricula:String(x.matricula||'').trim(),usuario:String(x.usuario||'').trim()})).filter(x=>x.matricula));if(e)throw e}saveLocal()}catch(e){console.error(e);setNotice('error','Não foi possível atualizar a base de usuários no banco.')}finally{setCloudBusy(false)}}
@@ -182,13 +183,79 @@ function bindBase(){
 function importCSV(file,kind){if(!file)return;let fr=new FileReader();fr.onload=async()=>{let rows=parseCSV(fr.result);if(kind==='users'){db.users=rows.map(r=>({matricula:r[0]||'',usuario:r[1]||''})).filter(x=>x.matricula||x.usuario);await syncUsers();setNotice('ok','Base de usuários atualizada no banco.')}else{db.base=rows.map(r=>({identificacao:r[0]||'',numeroSerie:r[1]||''})).filter(x=>x.identificacao||x.numeroSerie);await syncBase();setNotice('ok','Base de coletores atualizada no banco.')}};fr.readAsText(file,'UTF-8')}
 function importHistoryCSV(file){if(!file)return;let fr=new FileReader();fr.onload=async()=>{let rows=parseCSV(fr.result);let imported=rows.map(r=>({matricula:r[0]||'',usuario:r[1]||'',coletor:r[2]||'',status:r[3]||'BOM',tipo:r[4]||'',data:r[5]||'',hora:r[6]||'',identificacao:r[7]||''})).filter(x=>x.matricula||x.usuario||x.coletor||x.data||x.hora);if(!imported.length)return setNotice('error','Nenhum lançamento válido encontrado no CSV.');db.records=sortRecords(db.records.concat(imported));await syncRecords();setNotice('ok',`${imported.length.toLocaleString('pt-BR')} lançamento(s) sincronizado(s) com o banco.`)};fr.readAsText(file,'UTF-8')}
 function importBackup(file){if(!file)return;let fr=new FileReader();fr.onload=async()=>{try{let x=JSON.parse(fr.result);if(!x.records||!x.users||!x.base)throw Error();db=x;await syncAll();setNotice('ok','Backup sincronizado com o banco com sucesso.')}catch(e){console.error(e);setNotice('error','Arquivo de backup inválido ou não foi possível sincronizar.')}};fr.readAsText(file,'UTF-8')}
+let refreshTimer=null;
+let refreshInProgress=false;
+
+async function refreshFromCloud(showNotice=false){
+ if(!CLOUD_ENABLED || refreshInProgress)return;
+ refreshInProgress=true;
+ try{
+  const fresh=await loadCloudDB();
+  db=fresh;
+  saveLocal();
+  if(showNotice)notice={type:'ok',text:'Dados atualizados do banco.'};
+  render();
+ }catch(e){
+  console.error('Falha ao atualizar do Supabase:',e);
+  if(showNotice){
+   notice={type:'error',text:'Não foi possível atualizar os dados do banco.'};
+   render();
+  }
+ }finally{
+  refreshInProgress=false;
+ }
+}
+
+function startCloudSync(){
+ if(!CLOUD_ENABLED)return;
+ // Atualiza periodicamente para refletir alterações feitas em outro navegador
+ // ou diretamente no painel do Supabase, mesmo sem cache/realtime.
+ if(refreshTimer)clearInterval(refreshTimer);
+ refreshTimer=setInterval(()=>refreshFromCloud(false),5000);
+
+ // Atualiza imediatamente quando esta aba volta a ficar visível/ativa.
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshFromCloud(false)});
+ window.addEventListener('focus',()=>refreshFromCloud(false));
+ window.addEventListener('pageshow',()=>refreshFromCloud(false));
+
+ // Realtime: quando a publicação do Supabase estiver habilitada, a mudança
+ // chega praticamente em tempo real. O polling acima continua como garantia.
+ try{
+  sb.channel('controle-coletores-sync')
+   .on('postgres_changes',{event:'*',schema:'public',table:'lancamentos'},()=>refreshFromCloud(false))
+   .on('postgres_changes',{event:'*',schema:'public',table:'usuarios'},()=>refreshFromCloud(false))
+   .on('postgres_changes',{event:'*',schema:'public',table:'coletores'},()=>refreshFromCloud(false))
+   .subscribe();
+ }catch(e){console.warn('Realtime indisponível; polling continua ativo.',e)}
+}
+
 async function boot(){
- try{setCloudBusy(true);db=await loadCloudDB();saveLocal();setCloudBusy(false);render()}
- catch(e){
-  console.error('Banco indisponível; carregando dados locais.',e);setCloudBusy(false);
-  try{const local=JSON.parse(localStorage.getItem(LS));db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
-  catch(x){db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}}
-  notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};render()
+ try{
+  setCloudBusy(true);
+  db=await loadCloudDB();
+  saveLocal();
+  setCloudBusy(false);
+  render();
+  startCloudSync();
+ }catch(e){
+  console.error('Banco indisponível.',e);
+  setCloudBusy(false);
+  if(CLOUD_ENABLED){
+   // Não usar localStorage como fallback quando há Supabase configurado,
+   // pois isso pode mostrar dados apagados do banco.
+   db={records:[],users:[],base:[]};
+   notice={type:'error',text:'Sem conexão com o banco. Aguardando reconexão...'};
+  }else{
+   try{
+    const local=JSON.parse(localStorage.getItem(LS));
+    db=local&&local.records&&local.users&&local.base?local:{records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
+   }catch(x){
+    db={records:sortRecords(INITIAL_RECORDS),users:INITIAL_USERS,base:INITIAL_BASE}
+   }
+   notice={type:'error',text:'Sem conexão com o banco. Os lançamentos continuam sendo salvos neste navegador.'};
+  }
+  render();
+  startCloudSync();
  }
 }
 boot();
